@@ -1,44 +1,56 @@
 """Comprehensive Automated Regression Test Suite for Personal Expense Tracker.
 
-Covers all 25 automated regression tests verifying full application correctness, edge cases, and security invariants.
+Covers all 26 automated regression tests verifying full application correctness, edge cases, and security invariants.
 """
 
+import atexit
 import os
-import sqlite3
 import tempfile
+
+# CRITICAL STARTUP ORDERING GUARD:
+# Establish an isolated temporary database environment BEFORE importing app or database modules.
+# This prevents app.py's module-level `app = create_app()` from initializing the default expenses.db.
+_module_temp_dir = tempfile.TemporaryDirectory()
+_module_test_db = os.path.join(_module_temp_dir.name, "test_isolated.db")
+_orig_expenses_db = os.environ.get("EXPENSES_DB")
+os.environ["EXPENSES_DB"] = _module_test_db
+
+
+def _cleanup_module_temp_db():
+    try:
+        _module_temp_dir.cleanup()
+    except Exception:
+        pass
+    if _orig_expenses_db is not None:
+        os.environ["EXPENSES_DB"] = _orig_expenses_db
+    elif "EXPENSES_DB" in os.environ:
+        del os.environ["EXPENSES_DB"]
+
+
+atexit.register(_cleanup_module_temp_db)
+
+import sqlite3
 import unittest
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 
 import database
 from app import create_app, parse_amount_to_paise, validate_date_field, ValidationError
 
 
 class ExpenseTrackerRegressionTests(unittest.TestCase):
-    temp_dir: tempfile.TemporaryDirectory
-    test_db_path: str
-    orig_expenses_db: str | None = None
+    test_db_path: str = _module_test_db
 
     @classmethod
     def setUpClass(cls):
-        # Create an isolated temporary directory for test databases
-        cls.temp_dir = tempfile.TemporaryDirectory()
-        cls.test_db_path = os.path.join(cls.temp_dir.name, "test_isolated.db")
-        cls.orig_expenses_db = os.environ.get("EXPENSES_DB")
-        os.environ["EXPENSES_DB"] = cls.test_db_path
+        cls.test_db_path = _module_test_db
         database.init_db(cls.test_db_path)
 
     @classmethod
     def tearDownClass(cls):
-        # Clean up only the temporary directory; never touch expenses.db or any pre-existing files
-        try:
-            cls.temp_dir.cleanup()
-        except Exception:
-            pass
-        if cls.orig_expenses_db is not None:
-            os.environ["EXPENSES_DB"] = cls.orig_expenses_db
-        elif "EXPENSES_DB" in os.environ:
-            del os.environ["EXPENSES_DB"]
+        # Additional teardown safety
+        pass
 
     def setUp(self):
         # Clean test table before each test
@@ -493,15 +505,21 @@ class ExpenseTrackerRegressionTests(unittest.TestCase):
         finally:
             conn_test.close()
 
-        # 2. Verify item DOES NOT exist in the real expenses.db
-        conn_real = database.get_connection(database.DEFAULT_DB_PATH)
-        try:
-            real_matches = conn_real.execute(
-                "SELECT COUNT(*) FROM expenses WHERE title = ?", (unique_title,)
-            ).fetchone()[0]
-            self.assertEqual(real_matches, 0)
-        finally:
-            conn_real.close()
+        # 2. Verify default expenses.db is never modified, written to, or created merely to check isolation
+        if os.path.exists(database.DEFAULT_DB_PATH):
+            # Real database exists in workspace: inspect strictly in read-only URI mode without creating/migrating
+            ro_uri = f"file:{os.path.abspath(database.DEFAULT_DB_PATH)}?mode=ro"
+            conn_real = sqlite3.connect(ro_uri, uri=True)
+            try:
+                real_matches = conn_real.execute(
+                    "SELECT COUNT(*) FROM expenses WHERE title = ?", (unique_title,)
+                ).fetchone()[0]
+                self.assertEqual(real_matches, 0)
+            finally:
+                conn_real.close()
+        else:
+            # Real database does not exist: verify it remains completely absent
+            self.assertFalse(os.path.exists(database.DEFAULT_DB_PATH))
 
         # Verify environment variable and path isolation
         self.assertEqual(os.environ.get("EXPENSES_DB"), self.test_db_path)
@@ -726,6 +744,35 @@ class ExpenseTrackerRegressionTests(unittest.TestCase):
                 self.assertIn("date(date", table_row[0])
             finally:
                 conn.close()
+
+    # 26. Importing app in an environment without expenses.db does not create expenses.db
+    def test_26_import_isolation_without_default_db(self):
+        """Verifies that importing app in a clean directory with EXPENSES_DB override does not create expenses.db."""
+        import subprocess
+        import sys
+        with tempfile.TemporaryDirectory() as clean_dir:
+            default_db_probe = os.path.join(clean_dir, "expenses.db")
+            isolated_db = os.path.join(clean_dir, "isolated.db")
+
+            code = (
+                "import os, sys\n"
+                "from pathlib import Path\n"
+                "app_dir = Path(r'" + str(database.BASE_DIR) + "')\n"
+                "sys.path.insert(0, str(app_dir))\n"
+                "import app\n"
+                "assert not os.path.exists('expenses.db'), 'expenses.db was created in working directory!'\n"
+            )
+            env = os.environ.copy()
+            env["EXPENSES_DB"] = isolated_db
+            res = subprocess.run(
+                [sys.executable, "-c", code],
+                cwd=clean_dir,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(res.returncode, 0, f"Subprocess failed: {res.stderr}")
+            self.assertFalse(os.path.exists(default_db_probe))
 
 
 if __name__ == "__main__":

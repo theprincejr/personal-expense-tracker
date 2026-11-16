@@ -1,6 +1,6 @@
 # Personal Expense Tracker
 
-A fast, reliable, and interview-explainable local Personal Expense Tracker built with Python 3.11, Flask 3.0, SQLite 3, and vanilla JavaScript. Developed for a time-boxed practical software engineering assessment with an emphasis on code hygiene, exact monetary calculations, edge-case resilience, and explainable design decisions.
+A fast, reliable, and interview-explainable local Personal Expense Tracker built with Python 3.11+, Flask>=3.0,<4, SQLite 3, and vanilla JavaScript. Developed for a time-boxed practical software engineering assessment with an emphasis on code hygiene, exact monetary calculations, edge-case resilience, and explainable design decisions.
 
 ---
 
@@ -28,7 +28,7 @@ The Personal Expense Tracker enables users to manage daily expenses locally with
 
 | Layer | Technology | Decision Rationale |
 | :--- | :--- | :--- |
-| **Backend** | **Python 3.11 + Flask 3.0** | Minimal, synchronous web framework already available in the environment. Serves both static assets and REST API from a single process (`python app.py`) with zero build step or bundler friction. |
+| **Backend** | **Python 3.11+ / Flask>=3.0,<4** | Minimal, synchronous web framework already available in the environment. Serves both static assets and REST API from a single process (`python app.py`) with zero build step or bundler friction. |
 | **Database** | **SQLite 3 (`sqlite3` stdlib)** | Serverless, zero-configuration ACID database (`expenses.db`). Guarantees durable local persistence across application restarts without external credentials or containers. |
 | **Frontend** | **Semantic HTML5, CSS3, Vanilla JavaScript (`fetch`)** | Avoids npm package downloads, transpilation, and Webpack/Vite bundler configuration. Direct DOM manipulation with safe `textContent` rendering. |
 | **Monetary Precision** | **Integer Paise (`amount_paise`) + Python `Decimal`** | IEEE 754 binary floating-point numbers (`FLOAT`/`REAL`) cannot accurately represent decimal fractions like `0.1` or `0.2`, causing cumulative rounding errors. Storing integer paise (₹1.00 = 100 paise) guarantees exact monetary arithmetic without floating-point rounding errors. |
@@ -124,8 +124,8 @@ All endpoints consume and return `application/json`. Errors follow a uniform for
 ## 7. Installation & Startup Commands
 
 ### Prerequisites
-- Python 3.11 (or Python 3.8+)
-- `pip` package manager
+- Python 3.11+
+- `pip` package manager (`Flask>=3.0,<4` as specified in `requirements.txt`)
 
 ### Option A: Windows (PowerShell)
 
@@ -182,7 +182,7 @@ python test_app.py
 
 ### Actual Test Execution Output
 ```
-Ran 25 tests in 0.889s
+Ran 26 tests in 1.410s
 
 OK
 ```
@@ -213,6 +213,7 @@ OK
 23. **Unicode & Embedded NUL Safety:** Embedded NUL bytes (`\x00`) and lone surrogates are rejected with 400 across titles, notes, and search queries; valid Malayalam and multi-language Unicode text is fully supported.
 24. **Filter Query Isolation & Preservation:** Adding expenses while filters are active preserves filter isolation and keeps query boundaries intact.
 25. **Application Factory Schema Auto-Init:** `create_app()` automatically ensures the database schema and CHECK constraints are initialized for any configured database target.
+26. **Import Isolation Without Default DB:** Verifies that importing the application module in a clean directory does not create or initialize a default `expenses.db`.
 
 ---
 
@@ -225,12 +226,15 @@ The user enters title, amount, category, date, and note in the top form. `app.js
 - **Edit:** Clicking "Edit" on any table row populates the top form with existing data and changes the form into "Edit Mode" with a "Cancel Edit" button. Submitting sends a `PUT /api/expenses/<id>` request, updating the row in SQLite while preserving active filters.
 - **Delete:** Clicking "Delete" invokes browser-native `window.confirm()`. Upon confirmation, a `DELETE /api/expenses/<id>` request is sent, deleting the row and refreshing list and summary views while preserving active filters.
 
-### 3. Filtering & Searching
+### 3. Filtering, Searching & Race Condition Prevention
 The filter bar captures category, date range, and title search. The backend constructs a parameterized query with `title LIKE ? ESCAPE '!'`, where `!`, `%`, and `_` are escaped. Results are sorted newest first (`ORDER BY date DESC, id DESC`).
+- **Request Sequencing:** To prevent race conditions where slower older search responses overwrite newer filter results, `app.js` employs `AbortController` and an incremental request sequence counter. In-flight requests are automatically aborted upon new input, and any out-of-order responses are discarded.
 
-### 4. Filter Interaction Behavior
+### 4. Filter Interaction Behavior & Error Handling
 - **Universal Filter Preservation:** Active filters (category, date range, search query) are strictly preserved across Add, Edit, and Delete operations.
 - **Immediate Feedback:** Adding an expense displays a success notification even if the newly created record does not match the active filter criteria. The monthly summary card updates immediately to reflect the new expense, and the filtered table remains stable.
+- **Visible List Error State:** If fetching expenses fails, stale table rows are removed and an explicit error message is displayed in the table empty state, while filter input values remain preserved so the user can easily adjust or reset them.
+- **Visible Summary Error State:** If fetching the monthly summary fails, outdated numbers are cleared, an explicit "Unavailable" indicator is shown, and subsequent successful refreshes restore normal figures.
 - **Reset Capability:** Users can click "Reset Filters" at any time to clear all active filters and view the full unfiltered expense history.
 
 ### 5. Monthly Summary Aggregation

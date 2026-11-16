@@ -93,10 +93,26 @@ function showBanner(message, type = "success") {
 
 // --- Data Loading Functions ---
 
+// Request Sequencing & Cancellation State
+let activeExpensesAbortController = null;
+let activeExpenseRequestId = 0;
+
+let activeSummaryAbortController = null;
+let activeSummaryRequestId = 0;
+
 /**
  * Loads and renders expenses based on current filter values.
+ * Uses AbortController and request sequencing to prevent stale responses
+ * from overwriting newer search results.
  */
 async function loadExpenses() {
+    if (activeExpensesAbortController) {
+        activeExpensesAbortController.abort();
+    }
+    activeExpensesAbortController = new AbortController();
+    const { signal } = activeExpensesAbortController;
+    const currentRequestId = ++activeExpenseRequestId;
+
     const params = new URLSearchParams();
 
     const q = filterQ.value.trim();
@@ -110,10 +126,14 @@ async function loadExpenses() {
     if (toDate) params.set("to_date", toDate);
 
     try {
-        const response = await fetch(`/api/expenses?${params.toString()}`);
+        const response = await fetch(`/api/expenses?${params.toString()}`, { signal });
+        if (currentRequestId !== activeExpenseRequestId) return;
+
         const data = await response.json();
+        if (currentRequestId !== activeExpenseRequestId) return;
 
         if (!response.ok) {
+            renderExpensesError(data.error || "Failed to load expenses");
             showBanner(data.error || "Failed to load expenses", "error");
             return;
         }
@@ -121,19 +141,55 @@ async function loadExpenses() {
         currentExpenses = data;
         renderExpensesTable(currentExpenses);
     } catch (err) {
+        if (err.name === "AbortError") {
+            // Superseded by newer request; silently ignore
+            return;
+        }
+        if (currentRequestId !== activeExpenseRequestId) return;
+
+        renderExpensesError("Network error while loading expenses");
         showBanner("Network error while loading expenses", "error");
     }
 }
 
 /**
+ * Renders a visible error state in the expense table card when loading fails.
+ * Clears stale rows so users do not mistake previous results for current filter matches.
+ */
+function renderExpensesError(errorMessage) {
+    expensesTbody.innerHTML = "";
+    currentExpenses = [];
+    expensesCountBadge.textContent = "Error";
+    expensesCountBadge.className = "badge badge-neutral";
+
+    tableEmptyState.classList.remove("hidden");
+    const emptyIcon = tableEmptyState.querySelector(".empty-icon");
+    if (emptyIcon) emptyIcon.textContent = "⚠️";
+    emptyStateTitle.textContent = "Failed to load expenses";
+    emptyStateDesc.textContent = errorMessage;
+}
+
+/**
  * Loads the current month summary independently of active list filters.
+ * Uses request sequencing to prevent stale responses and shows an explicit error state on failure.
  */
 async function loadMonthlySummary() {
+    if (activeSummaryAbortController) {
+        activeSummaryAbortController.abort();
+    }
+    activeSummaryAbortController = new AbortController();
+    const { signal } = activeSummaryAbortController;
+    const currentRequestId = ++activeSummaryRequestId;
+
     try {
-        const response = await fetch("/api/summary/current-month");
+        const response = await fetch("/api/summary/current-month", { signal });
+        if (currentRequestId !== activeSummaryRequestId) return;
+
         const data = await response.json();
+        if (currentRequestId !== activeSummaryRequestId) return;
 
         if (!response.ok) {
+            renderSummaryError("Summary data unavailable");
             return;
         }
 
@@ -143,8 +199,25 @@ async function loadMonthlySummary() {
 
         renderSummaryBreakdown(data.breakdown);
     } catch (err) {
-        console.error("Failed to load monthly summary:", err);
+        if (err.name === "AbortError") return;
+        if (currentRequestId !== activeSummaryRequestId) return;
+        renderSummaryError("Summary temporarily unavailable");
     }
+}
+
+/**
+ * Displays a visible error state in the monthly summary card on failure.
+ * Clears outdated totals so they cannot be mistaken for current values.
+ */
+function renderSummaryError(message) {
+    summaryMonthTitle.textContent = "Current Month Summary";
+    summaryTotalAmount.textContent = "Unavailable";
+    summaryExpenseCount.textContent = "—";
+    summaryBreakdownContainer.innerHTML = "";
+    const hint = document.createElement("p");
+    hint.className = "empty-hint";
+    hint.textContent = `⚠️ ${message}.`;
+    summaryBreakdownContainer.appendChild(hint);
 }
 
 // --- Rendering Functions ---
@@ -159,6 +232,8 @@ function renderExpensesTable(expenses) {
 
     if (expenses.length === 0) {
         tableEmptyState.classList.remove("hidden");
+        const emptyIcon = tableEmptyState.querySelector(".empty-icon");
+        if (emptyIcon) emptyIcon.textContent = "📝";
         const hasFilters = filterQ.value.trim() || filterCategory.value || filterFromDate.value || filterToDate.value;
         if (hasFilters) {
             emptyStateTitle.textContent = "No matching expenses";
